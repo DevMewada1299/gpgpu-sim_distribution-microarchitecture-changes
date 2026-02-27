@@ -1,3 +1,219 @@
+# CHANGES — Dynamic SWL Controller via Multi-Armed Bandit
+
+> **Fork of:** [gpgpu-sim/gpgpu-sim_distribution](https://github.com/gpgpu-sim/gpgpu-sim_distribution)
+> **Branch:** `dev`
+> **Author:** Dev Mewada
+> **Scope:** GPU Microarchitecture — Warp Scheduler Extension
+
+---
+
+## Overview
+
+This fork extends GPGPU-Sim with a **Dynamic Simultaneous Warp Limiting (SWL) Controller** that autonomously tunes the active warp cap per Streaming Multiprocessor (SM) at runtime using a **non-contextual Multi-Armed Bandit (MAB)** algorithm.
+
+Static warp occupancy is a known performance bottleneck: too many warps cause register file pressure and cache thrashing; too few fail to hide memory latency. This controller eliminates manual tuning by continuously learning the optimal warp cap during kernel execution.
+
+---
+
+## The Problem
+
+Modern GPU SMs can host dozens of warps simultaneously. The number of **active warps** (occupancy) directly affects:
+
+- **Memory latency hiding** — more warps = more instruction-level parallelism to cover stalls
+- **Register file pressure** — more warps = fewer registers per warp, potential spilling
+- **L1/shared memory thrashing** — over-subscription degrades cache hit rates
+
+Traditional GPGPU-Sim uses a **fixed warp cap** set at configuration time. This requires offline profiling per kernel and fails to adapt to phase changes within a single kernel execution.
+
+---
+
+## Contribution: Dynamic SWL Controller
+
+### Algorithm Design
+
+The controller models the warp cap selection problem as a **K-armed bandit**:
+
+| Concept | Mapping |
+|---|---|
+| **Arms** | Each valid warp cap value (e.g. 2, 4, 8, 16, 24, 32 warps) |
+| **Reward** | IPC measured over a fixed observation window |
+| **Q-value** | Running average IPC for each arm |
+| **Policy** | Explore-then-exploit with greedy hill-climbing |
+
+### Execution Policy (Two Phases)
+
+**Phase 1 — Exploration:**
+Each warp cap is tried exactly once in sequence. This bootstraps Q-value estimates for all arms with a single pass, ensuring no arm is permanently ignored due to cold-start bias.
+
+**Phase 2 — Exploitation (Greedy Hill-Climb):**
+The controller selects the arm with the highest running-average IPC and evaluates its immediate neighbors (`cap - 1`, `cap + 1`). It commits to whichever yields the best IPC in the next window. This local search converges quickly without requiring a global scan each interval.
+
+### IPC Measurement Window
+
+Each arm is evaluated over a **fixed cycle window** (configurable). At the end of each window:
+1. Committed instructions are counted
+2. IPC = instructions / window cycles
+3. Q-value for the active arm is updated: `Q(a) ← α·IPC + (1−α)·Q(a)`
+4. Next arm is selected per policy
+
+---
+
+## Modified Files
+
+| File | Change |
+|---|---|
+| `src/gpgpu-sim/shader.h` | Added `swl_controller` struct; warp cap state variables; IPC window counters |
+| `src/gpgpu-sim/shader.cc` | Integrated controller tick into per-SM cycle loop; arm selection & Q-update logic |
+| `src/gpgpu-sim/gpu-sim.cc` | Exposed per-SM warp cap to scheduler; wired controller output to occupancy limit |
+| `configs/` | Added `gpgpusim_swl_dynamic.config` with controller hyperparameters |
+
+---
+
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+    %% ── CUDA Kernel Execution ──
+    PTX["🚀 PTX / SASS Instructions"]
+    CTA["CTA Dispatch\nThread Blocks → SM"]
+    WARPS["Active Warp Pool\ncapped by SWL controller"]
+
+    %% ── SM Pipeline ──
+    WS["Warp Scheduler\nGTO / LRR / Two-Level"]
+    EU["Execution Units\nINT · FP · LD-ST · SFU"]
+    SMEM["Shared Memory & L1 Cache"]
+    RF["Register File"]
+
+    %% ── SWL Controller ──
+    WIN["⚙️ IPC Window Counter\ncycle_count · instr_count"]
+    UPDATE["Q-Update\nQ_a ← α·IPC + 1-α·Q_a"]
+    QVAL["Q-Value Table\nQ[cap] = running avg IPC"]
+
+    %% ── Selection Policy ──
+    EXP["Phase 1 · Exploration\nTry each cap once\ncold-start bootstrap"]
+    HILL["Phase 2 · Hill-Climb\nBest cap ± 1 neighbor\ngreedy exploit"]
+
+    %% ── MAB Arms ──
+    A1["Arm  cap=2"]
+    A2["Arm  cap=4"]
+    A3["Arm  cap=8"]
+    A4["Arm  cap=16"]
+    A5["Arm  cap=32"]
+
+    %% ── Outputs ──
+    IPC_HIGH["↑ IPC\noptimal latency hiding"]
+    REG_OK["↓ Register Pressure\nfewer spills"]
+    CACHE_OK["↓ Cache Thrashing\nbetter L1 hit rate"]
+
+    %% ── Edges ──
+    PTX --> CTA --> WARPS
+    WARPS -->|"issues instructions"| WS
+    WS --> EU & SMEM
+    EU & SMEM --> RF
+
+    WS -->|"cycle tick + committed instrs"| WIN
+    WIN -->|"IPC = instrs / window"| UPDATE
+    UPDATE --> QVAL
+    QVAL --> EXP
+    EXP -->|"bootstrap done"| HILL
+    HILL -->|"selected cap"| WARPS
+
+    HILL -->|"pick arm"| A1 & A2 & A3 & A4 & A5
+    A3 -->|"reward = IPC"| UPDATE
+
+    WARPS --> IPC_HIGH & REG_OK & CACHE_OK
+
+    %% ── Styles ──
+    classDef kernelStyle fill:#1f1800,stroke:#f59e0b,color:#fbbf24
+    classDef smStyle     fill:#0d1f18,stroke:#10b981,color:#10b981
+    classDef swlStyle    fill:#0f1f2b,stroke:#38bdf8,color:#38bdf8
+    classDef policyStyle fill:#1a1030,stroke:#7c3aed,color:#a78bfa
+    classDef mabStyle    fill:#1a0f2b,stroke:#e879f9,color:#e879f9
+    classDef outStyle    fill:#0d1820,stroke:#34d399,color:#34d399
+
+    class PTX,CTA,WARPS kernelStyle
+    class WS,EU,SMEM,RF smStyle
+    class WIN,UPDATE,QVAL swlStyle
+    class EXP,HILL policyStyle
+    class A1,A2,A3,A4,A5 mabStyle
+    class IPC_HIGH,REG_OK,CACHE_OK outStyle
+```
+
+---
+
+## Configuration Parameters
+
+Add to your `gpgpusim.config` to enable the dynamic controller:
+
+```bash
+# Enable dynamic SWL controller
+-gpgpu_swl_dynamic_enabled 1
+
+# Observation window size (cycles per arm evaluation)
+-gpgpu_swl_window_size 2000
+
+# Running average decay factor (0.0 = pure average, 1.0 = last sample only)
+-gpgpu_swl_alpha 0.3
+
+# Warp cap candidates (space-separated)
+-gpgpu_swl_caps 2 4 8 16 24 32
+
+# Disable to use static cap (original behavior)
+# -gpgpu_max_warp_per_sm 32
+```
+
+---
+
+## Baseline vs. Dynamic SWL
+
+| | Static SWL | Dynamic SWL (this work) |
+|---|---|---|
+| **Warp cap** | Fixed at config time | Adapts every N cycles |
+| **Tuning** | Manual, per-kernel | Automatic |
+| **Algorithm** | None | MAB + greedy hill-climb |
+| **Phase sensitivity** | None | Responds to kernel phases |
+| **Cold-start** | N/A | One full exploration pass |
+| **Overhead** | Zero | ~1 counter + K Q-values per SM |
+
+---
+
+## How to Reproduce
+
+```bash
+# Clone and build
+git clone https://github.com/DevMewada1299/gpgpu-sim_distribution-microarchitecture-changes
+cd gpgpu-sim_distribution-microarchitecture-changes
+source setup_environment release
+make -j$(nproc)
+
+# Copy dynamic config to your benchmark directory
+cp configs/swl_dynamic/gpgpusim_swl_dynamic.config <benchmark_dir>/gpgpusim.config
+
+# Run any CUDA benchmark (e.g. Rodinia hotspot)
+cd <benchmark_dir>
+./hotspot 512 2 2 ./data/temp_512 ./data/power_512 output.out
+```
+
+---
+
+## Related Work
+
+- **GTO / Two-Level Warp Scheduling** — prioritizes warps to reduce cache thrashing but uses fixed occupancy
+- **RLWS (Anantpur et al.)** — full RL-based warp scheduler with state variables; higher overhead
+- **Variable Warp Size (Rogers et al., ISCA 2015)** — changes warp width; orthogonal to occupancy cap
+- **This work** — lightweight online occupancy tuning, zero ISA changes, minimal hardware overhead
+
+---
+
+*Built on GPGPU-Sim 4.x — a cycle-level GPU simulator from UBC (ISCA 2020, Khairy et al.)*
+
+
+
+
+
+
+
+
 Welcome to GPGPU-Sim, a cycle-level simulator modeling contemporary graphics
 processing units (GPUs) running GPU computing workloads written in CUDA or
 OpenCL. Also included in GPGPU-Sim is a performance visualization tool called
