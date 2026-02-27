@@ -27,48 +27,6 @@ Traditional GPGPU-Sim uses a **fixed warp cap** set at configuration time. This 
 
 ---
 
-## Contribution: Dynamic SWL Controller
-
-### Algorithm Design
-
-The controller models the warp cap selection problem as a **K-armed bandit**:
-
-| Concept | Mapping |
-|---|---|
-| **Arms** | Each valid warp cap value (e.g. 2, 4, 8, 16, 24, 32 warps) |
-| **Reward** | IPC measured over a fixed observation window |
-| **Q-value** | Running average IPC for each arm |
-| **Policy** | Explore-then-exploit with greedy hill-climbing |
-
-### Execution Policy (Two Phases)
-
-**Phase 1 — Exploration:**
-Each warp cap is tried exactly once in sequence. This bootstraps Q-value estimates for all arms with a single pass, ensuring no arm is permanently ignored due to cold-start bias.
-
-**Phase 2 — Exploitation (Greedy Hill-Climb):**
-The controller selects the arm with the highest running-average IPC and evaluates its immediate neighbors (`cap - 1`, `cap + 1`). It commits to whichever yields the best IPC in the next window. This local search converges quickly without requiring a global scan each interval.
-
-### IPC Measurement Window
-
-Each arm is evaluated over a **fixed cycle window** (configurable). At the end of each window:
-1. Committed instructions are counted
-2. IPC = instructions / window cycles
-3. Q-value for the active arm is updated: `Q(a) ← α·IPC + (1−α)·Q(a)`
-4. Next arm is selected per policy
-
----
-
-## Modified Files
-
-| File | Change |
-|---|---|
-| `src/gpgpu-sim/shader.h` | Added `swl_controller` struct; warp cap state variables; IPC window counters |
-| `src/gpgpu-sim/shader.cc` | Integrated controller tick into per-SM cycle loop; arm selection & Q-update logic |
-| `src/gpgpu-sim/gpu-sim.cc` | Exposed per-SM warp cap to scheduler; wired controller output to occupancy limit |
-| `configs/` | Added `gpgpusim_swl_dynamic.config` with controller hyperparameters |
-
----
-
 ## Architecture Diagram
 
 ```mermaid
@@ -138,6 +96,50 @@ flowchart TD
     class A1,A2,A3,A4,A5 mabStyle
     class IPC_HIGH,REG_OK,CACHE_OK outStyle
 ```
+
+## Contribution: Dynamic SWL Controller
+
+### Algorithm Design
+
+The controller models the warp cap selection problem as a **K-armed bandit**:
+
+| Concept | Mapping |
+|---|---|
+| **Arms** | Each valid warp cap value (e.g. 2, 4, 8, 16, 24, 32 warps) |
+| **Reward** | IPC measured over a fixed observation window |
+| **Q-value** | Running average IPC for each arm |
+| **Policy** | Explore-then-exploit with greedy hill-climbing |
+
+### Execution Policy (Two Phases)
+
+**Phase 1 — Exploration:**
+Each warp cap is tried exactly once in sequence. This bootstraps Q-value estimates for all arms with a single pass, ensuring no arm is permanently ignored due to cold-start bias.
+
+**Phase 2 — Exploitation (Greedy Hill-Climb):**
+The controller selects the arm with the highest running-average IPC and evaluates its immediate neighbors (`cap - 1`, `cap + 1`). It commits to whichever yields the best IPC in the next window. This local search converges quickly without requiring a global scan each interval.
+
+### IPC Measurement Window
+
+Each arm is evaluated over a **fixed cycle window** (configurable). At the end of each window:
+1. Committed instructions are counted
+2. IPC = instructions / window cycles
+3. Q-value for the active arm is updated: `Q(a) ← α·IPC + (1−α)·Q(a)`
+4. Next arm is selected per policy
+
+---
+
+## Modified Files
+
+| File | Change |
+|---|---|
+| `src/gpgpu-sim/shader.h` | Added `swl_controller` struct; warp cap state variables; IPC window counters |
+| `src/gpgpu-sim/shader.cc` | Integrated controller tick into per-SM cycle loop; arm selection & Q-update logic |
+| `src/gpgpu-sim/gpu-sim.cc` | Exposed per-SM warp cap to scheduler; wired controller output to occupancy limit |
+| `configs/` | Added `gpgpusim_swl_dynamic.config` with controller hyperparameters |
+
+---
+
+
 
 ---
 
