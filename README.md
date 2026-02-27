@@ -9,7 +9,7 @@
 
 ## Overview
 
-This fork extends GPGPU-Sim with a **Dynamic Simultaneous Warp Limiting (SWL) Controller** that autonomously tunes the active warp cap per Streaming Multiprocessor (SM) at runtime using a **non-contextual Multi-Armed Bandit (MAB)** algorithm.
+This fork extends GPGPU-Sim with a **Dynamic Static Warp Limiting (SWL) Controller** that autonomously tunes the active warp cap per Streaming Multiprocessor (SM) at runtime using a **non-contextual Multi-Armed Bandit (MAB)** algorithm.
 
 Static warp occupancy is a known performance bottleneck: too many warps cause register file pressure and cache thrashing; too few fail to hide memory latency. This controller eliminates manual tuning by continuously learning the optimal warp cap during kernel execution.
 
